@@ -1148,6 +1148,14 @@ def _session_cwd(session: dict | None) -> str:
     return _completion_cwd()
 
 
+def _session_source(session: dict | None) -> str:
+    if session:
+        source = str(session.get("source") or "").strip()
+        if source:
+            return source
+    return "tui"
+
+
 def _register_session_cwd(session: dict | None) -> None:
     if not session:
         return
@@ -1247,7 +1255,7 @@ def _ensure_session_db_row(session: dict) -> None:
     try:
         db.create_session(
             key,
-            source="tui",
+            source=_session_source(session),
             model=row_model,
             model_config=model_config or None,
             cwd=_session_cwd(session) if session.get("explicit_cwd") else None,
@@ -1416,7 +1424,13 @@ def _set_session_context(session_key: str, cwd: str | None = None) -> list:
         # know the parent workspace pass it explicitly so spawned agents inherit
         # it instead of falling back to the gateway launch dir.
         resolved = cwd if cwd is not None else _cwd_for_session_key(session_key)
-        return set_session_vars(session_key=session_key, cwd=resolved)
+        source = "tui"
+        with _sessions_lock:
+            for sess in list(_sessions.values()):
+                if sess.get("session_key") == session_key:
+                    source = _session_source(sess)
+                    break
+        return set_session_vars(session_key=session_key, source=source, cwd=resolved)
     except Exception:
         return []
 
@@ -3512,7 +3526,8 @@ def _schedule_mcp_late_refresh(sid: str, agent) -> None:
 
     The agent snapshots ``agent.tools`` once at build time and never re-reads
     the registry (run_agent/agent_init). ``_make_agent`` briefly joins the
-    background MCP discovery thread (``wait_for_mcp_discovery``, ~0.75s) so
+    background MCP discovery thread (``wait_for_mcp_discovery``, bounded by the
+    ``mcp_discovery_timeout`` config value, default 1.5s) so
     already-spawning servers land in that snapshot — but a server that takes
     longer than the bound to connect (common for an HTTP MCP server on first
     connect) lands *after* the agent is built. Its tools are then absent from
@@ -4183,6 +4198,7 @@ def _(rid, params: dict) -> dict:
     except Exception:
         explicit_cwd = False
     resolved_cwd = _completion_cwd(params)
+    source = str(params.get("source") or "tui").strip() or "tui"
     _enable_gateway_prompts()
 
     # ``profile`` (app-global remote mode): a new chat started under a non-launch
@@ -4248,6 +4264,7 @@ def _(rid, params: dict) -> dict:
             "running": False,
             "session_key": key,
             "show_reasoning": _load_show_reasoning(),
+            "source": source,
             "slash_worker": None,
             "tool_progress_mode": _load_tool_progress_mode(),
             "tool_started_at": {},
@@ -4521,6 +4538,7 @@ def _(rid, params: dict) -> dict:
         # report its liveness from the relay registry so the window paints a
         # busy indicator instead of a dead idle transcript.
         child_running = _child_run_active(target)
+        source = str(params.get("source") or "tui").strip() or "tui"
         with _session_resume_lock:
             live = _find_live_session_by_key(target)
             if live is not None:
@@ -4556,6 +4574,7 @@ def _(rid, params: dict) -> dict:
                     "running": False,
                     "session_key": target,
                     "show_reasoning": _load_show_reasoning(),
+                    "source": source,
                     "slash_worker": None,
                     "tool_progress_mode": _load_tool_progress_mode(),
                     "tool_started_at": {},
@@ -5753,7 +5772,7 @@ def _(rid, params: dict) -> dict:
             )
         db.create_session(
             new_key,
-            source="tui",
+            source=_session_source(session),
             model=_resolve_model(),
             # Stable _branched_from marker so list_sessions_rich() keeps the
             # branch visible in /resume and /sessions. The TUI branch leaves
